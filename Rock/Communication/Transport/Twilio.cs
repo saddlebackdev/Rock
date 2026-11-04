@@ -361,9 +361,22 @@ namespace Rock.Communication.Transport
         private async static Task<MessageResource> SendTwilioMessageAsync( string fromPhone, string callbackUrl, List<Uri> attachmentMediaUrls, string twilioNumber, string messageText )
         {
             MessageResource response = null;
-            CreateMessageOptions createMessageOptions = new CreateMessageOptions( new TwilioTypes.PhoneNumber( twilioNumber ) )
+
+            /*
+                11/4/2026 - GR
+
+                Twilio sends WhatsApp through the same Messaging API as SMS, but both addresses must carry the
+                "whatsapp:" channel (e.g. "whatsapp:+14155238886"). A system phone number stored as "whatsapp:<number>"
+                already receives WhatsApp through TwilioSms.ashx; this makes replies and outgoing messages from it go
+                out over WhatsApp too, instead of failing with "From and To should be of the same channel".
+
+                Reason: WhatsApp as a texting channel through Twilio (Rock Idea 2291).
+            */
+            var isWhatsApp = IsWhatsAppAddress( fromPhone );
+
+            CreateMessageOptions createMessageOptions = new CreateMessageOptions( new TwilioTypes.PhoneNumber( isWhatsApp ? ToWhatsAppAddress( twilioNumber ) : twilioNumber ) )
             {
-                From = new TwilioTypes.PhoneNumber( fromPhone ),
+                From = new TwilioTypes.PhoneNumber( isWhatsApp ? ToWhatsAppAddress( fromPhone ) : fromPhone ),
                 Body = messageText
             };
 
@@ -558,7 +571,16 @@ namespace Rock.Communication.Transport
                     var isOptOutErrorCode = OptOutErrorCodes.Contains( ex.Code );
                     var isInvalidNumberErrorCode = InvalidNumberErrorCodes.Contains( ex.Code );
 
-                    if ( isOptOutErrorCode || isInvalidNumberErrorCode )
+                    /*
+                        11/4/2026 - GR
+
+                        A failed WhatsApp send (the person isn't on WhatsApp, has blocked the sender, or is outside the
+                        24-hour window) says nothing about whether their number can receive SMS, so it must not switch off
+                        SMS on that number. The recipient is still marked Failed above.
+
+                        Reason: WhatsApp as a texting channel through Twilio (Rock Idea 2291).
+                    */
+                    if ( ( isOptOutErrorCode || isInvalidNumberErrorCode ) && !IsWhatsAppAddress( fromPhone ) )
                     {
                         // Disable SMS for this number because the response indicates that Rock should not send messages to that number anymore.
                         var phoneNumber = recipient.PersonAlias.Person.PhoneNumbers.Where( p => p.IsMessagingEnabled ).FirstOrDefault();
@@ -1185,6 +1207,41 @@ namespace Rock.Communication.Transport
         {
             // if the number of digits in the phone number 10 or more, assume is it a LongCode ( if it is less than 10, assume it is a short-code)
             return fromNumber.AsNumeric().Length >= 10;
+        }
+
+        /// <summary>
+        /// The channel prefix Twilio uses for WhatsApp addresses.
+        /// </summary>
+        private const string WhatsAppAddressPrefix = "whatsapp:";
+
+        /// <summary>
+        /// Determines whether the address is a Twilio WhatsApp address, such as a system phone number stored as
+        /// "whatsapp:14155238886".
+        /// </summary>
+        /// <param name="address">The phone number or address.</param>
+        /// <returns><c>true</c> if the address starts with "whatsapp:"; otherwise, <c>false</c>.</returns>
+        private static bool IsWhatsAppAddress( string address )
+        {
+            return address != null && address.Trim().StartsWith( WhatsAppAddressPrefix, StringComparison.OrdinalIgnoreCase );
+        }
+
+        /// <summary>
+        /// Converts a phone number to the WhatsApp address Twilio expects, "whatsapp:+&lt;country code&gt;&lt;number&gt;".
+        /// A system phone number is limited to 20 characters, so a WhatsApp sender may be stored without its "+";
+        /// this adds it back. An address that is already in WhatsApp form is returned in the same form.
+        /// </summary>
+        /// <param name="phoneNumber">The phone number, with or without the "whatsapp:" prefix.</param>
+        /// <returns>The WhatsApp address.</returns>
+        private static string ToWhatsAppAddress( string phoneNumber )
+        {
+            var number = ( phoneNumber ?? string.Empty ).Trim();
+
+            if ( IsWhatsAppAddress( number ) )
+            {
+                number = number.Substring( WhatsAppAddressPrefix.Length ).Trim();
+            }
+
+            return WhatsAppAddressPrefix + ( number.StartsWith( "+" ) ? number : "+" + number );
         }
 
         /// <summary>
